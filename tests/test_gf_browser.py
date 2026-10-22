@@ -2092,6 +2092,24 @@ def test_the_transport_help_describes_the_serialised_multi_cabin_run() -> None:
     assert "applies to single-cabin searches" not in flat
 
 
+def test_the_search_headed_help_names_auto_as_a_flag_that_opens_chrome() -> None:
+    """`--gf-transport auto` escalates to Chrome once Google rate-limits http, and
+    the transport is built with `headed=gf_headed`, so `--gf-headed` shows auto's
+    window too. A help line naming only `browser` tells a user watching for a
+    window that the flag does nothing under `auto`."""
+    from typer.testing import CliRunner
+
+    from flight_cli import cli
+
+    result = CliRunner().invoke(cli.app, ["search", "--help"], env={"COLUMNS": "200"})
+    assert result.exit_code == 0
+    flat = _flat_help(result.output)
+    assert (
+        "Show the Chrome window --gf-transport browser opens, and the one --gf-transport "
+        "auto opens once Google rate-limits http. Default: headless." in flat
+    )
+
+
 def test_four_browser_failures_read_as_four_different_notes(tmp_path: pathlib.Path) -> None:
     """The enrich path is the DEFAULT search and prints only the note. Built
     from the remedy alone it said "Retry" for a missing Chrome, a nav timeout, a

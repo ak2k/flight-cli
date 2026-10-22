@@ -12063,7 +12063,10 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
     gf_headed: bool = typer.Option(
         False,
         "--gf-headed",
-        help="Show the Chrome window --gf-transport browser opens. Default: headless.",
+        help=(
+            "Show the Chrome window --gf-transport browser opens, and the one "
+            "--gf-transport auto opens once Google rate-limits http. Default: headless."
+        ),
         rich_help_panel=_GROUP_BACKEND,
     ),
     providers: str | None = typer.Option(
