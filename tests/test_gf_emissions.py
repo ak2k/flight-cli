@@ -378,7 +378,12 @@ def _render(
     buffer = io.StringIO()
     console = (
         Console(
-            file=buffer, width=200, force_terminal=True, color_system="truecolor", no_color=False
+            file=buffer,
+            width=200,
+            height=50,
+            force_terminal=True,
+            color_system="truecolor",
+            no_color=False,
         )
         if color
         else Console(file=buffer, width=200, no_color=True)
