@@ -1,7 +1,7 @@
 # pyright: reportPrivateUsage=false
 """The guard against resolving an airport code through fli's enum sees each
-form such a lookup takes, and passes the ones that cannot hand a code another
-airport's member."""
+form such a lookup takes by name in one module, passes the ones that cannot
+hand a code another airport's member, and is documented as no wider."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import ast
 
 import pytest
 
+import test_airport_alias_requests as guard
 from test_airport_alias_requests import _SRC, _enum_lookups
 
 
@@ -89,3 +90,25 @@ def test_the_allowlist_names_exist_only_where_the_source_defines_them() -> None:
             if isinstance(node, ast.FunctionDef) and node.name in found:
                 found[node.name].append(path.name)
     assert found == {"fli_airports": ["fli_bridge.py"], "_leg_airport": ["_gflight_ids.py"]}
+
+
+# The guard reads one module at a time and matches names, so a name another
+# module re-exports the enum under, and a string lookup of it, pass.
+_PASSED = [
+    "from flight_cli.ports import Port\nPort['OKA']",
+    "import fli.models\ngetattr(fli.models, 'Airport')['OKA']",
+]
+
+
+def test_the_airport_guard_docs_name_the_lookups_it_passes() -> None:
+    """The memo and the guard's docstring name the forms it passes, and claim
+    neither any import name nor every annotation."""
+    memo = (_SRC.parents[1] / "docs" / "memories" / "gf_search_transport.md").read_text()
+    doc = guard.test_no_code_resolves_an_airport_through_flis_enum.__doc__ or ""
+    for source in _PASSED:
+        assert _enum_lookups(ast.parse(source)) == [], source
+    for text in (" ".join(memo.split()), " ".join(doc.split())):
+        assert "any import name" not in text
+        assert "except an annotation" not in text
+        assert "re-exports the enum" in text
+        assert '`getattr(fli.models, "Airport")`' in text

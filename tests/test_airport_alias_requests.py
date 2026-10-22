@@ -366,9 +366,12 @@ def _enum_lookups(tree: ast.AST) -> list[int]:
 def test_no_code_resolves_an_airport_through_flis_enum() -> None:
     """The enum hands an aliased code another airport's member, so every
     lookup goes through `fli_bridge.fli_airport`: every load of the enum or of
-    `_parse_airport` fails, under any import name, except an annotation, an
-    `isinstance` check and the bodies of `fli_airports` and `_leg_airport`.
-    Read from the syntax tree, so prose naming the enum does not match."""
+    `_parse_airport` fails, by its name, an `as` alias of that name or a dotted
+    path, except the enum as a type in an annotation, an `isinstance` check and
+    the bodies of `fli_airports` and `_leg_airport`. Read from one module's
+    syntax tree at a time, so prose naming the enum does not match, and neither
+    does a name another module re-exports the enum under or a string lookup
+    such as `getattr(fli.models, "Airport")`."""
     found = [
         f"{path.relative_to(_SRC).as_posix()}:{line}"
         for path in sorted(_SRC.rglob("*.py"))
