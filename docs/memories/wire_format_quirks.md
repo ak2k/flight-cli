@@ -157,8 +157,9 @@ failure mode otherwise.
    that combination.
 
 These are indistinguishable from the response. Surface a helpful message
-("Calendar empty. Matrix's calendar mode brownouts regularly; retry") and
-include the deep-link URL so users can verify in the UI.
+("Calendar empty. Matrix's calendar mode brownouts regularly; retry, use
+flight calendar --fast for Google's date grid, or flight search for a single
+date") and include the deep-link URL so users can verify in the UI.
 
 A fourth case is NOT one of these and must not wear that message: a fanned-out
 multi-airport calendar whose sub-queries never answered. There is no response to
