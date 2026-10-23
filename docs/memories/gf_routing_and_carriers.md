@@ -320,3 +320,8 @@ shows, in the order the rows first show it. A code takes its full name from
 never used for a code sold for another operator (EN flies the LH flight, and LH
 is not "Air Dolomiti"). Under a codeshare relabel both codes on screen are
 named. Add a code to the map when a table shows one with no name.
+The Matrix table prints the same line through `_print_matrix_carrier_legend`,
+naming each code by Matrix's `shortName`. Both go through
+`_print_carrier_legend_line`, which collapses the whitespace runs of an entry, a
+newline and a tab included, to one space, so a name cannot break the legend over
+two lines.

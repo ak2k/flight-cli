@@ -207,3 +207,11 @@ def test_a_search_prints_the_legend_under_its_table(gf_session: Callable[..., An
     legend = _legend(result.stdout.splitlines())
     assert len(legend) == 1
     assert "DL Delta Air Lines" in legend[0]
+
+
+def test_a_name_google_sent_with_a_line_break_stays_on_the_legend_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metal = LegAmenities(operating_carrier="EN", operating_carrier_name="Air\n\tDolomiti")
+    row = _row(("EN", "8858"), amenities={0: metal})
+    assert _legend(_printed(monkeypatch, [row])) == ["Carriers: EN Air Dolomiti"]

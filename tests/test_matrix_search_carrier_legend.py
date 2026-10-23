@@ -142,3 +142,10 @@ def test_codes_that_print_alike_are_one_legend_entry(monkeypatch: pytest.MonkeyP
         monkeypatch, [_solution(("DL", "Delta")), _solution(("D\u200bL", "Delta Air Lines"))]
     )
     assert _legend(lines) == ["Carriers: DL Delta"]
+
+
+def test_a_short_name_with_a_line_break_stays_on_the_legend_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lines = _printed(monkeypatch, [_solution(("DL", "Delta\n\tAir  Lines"), ("AA", "American"))])
+    assert _legend(lines) == ["Carriers: DL Delta Air Lines · AA American"]
