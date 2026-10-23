@@ -1,10 +1,12 @@
 """An empty Matrix calendar points a one-date search at `flight search`.
 
 `flight fare` is a deprecated alias that prints its own deprecation warning,
-so the advice beside "Calendar empty." names the command a user should run."""
+so the advice beside "Calendar empty." names the command a user should run. It
+also names `flight calendar --fast`, Google's date grid, as the fallback."""
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -51,3 +53,25 @@ def test_an_empty_calendar_names_flight_search_for_a_single_date(
     assert "Calendar empty." in advice
     assert "flight fare" not in advice
     assert "flight search" in advice
+
+
+def test_an_empty_calendar_offers_the_fast_google_grid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _serve_empty(monkeypatch)
+    result = CliRunner().invoke(
+        cli.app, [*_ROUTE, "--gf-transport", "http", "--no-cache"], env={"COLUMNS": "200"}
+    )
+    assert result.exit_code == 0, result.output
+    advice = " ".join(result.stdout.split())
+    assert "Calendar empty." in advice
+    assert "flight calendar --fast" in advice
+
+
+def test_the_brownout_memo_quotes_the_fast_grid_advice() -> None:
+    memo = Path(__file__).parents[1] / "docs" / "memories" / "wire_format_quirks.md"
+    text = " ".join(memo.read_text().split())
+    assert (
+        "retry, use flight calendar --fast for Google's date grid, or flight search "
+        "for a single date" in text
+    )

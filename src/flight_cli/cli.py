@@ -5360,8 +5360,8 @@ def _render_calendar(
     if res.solution_count == 0 or not res.priced_days:
         console.print(
             "[yellow]Calendar empty.[/] Matrix's calendar mode "
-            "brownouts regularly; retry, or use [bold]flight search[/] "
-            "for a single date."
+            "brownouts regularly; retry, use [bold]flight calendar --fast[/] "
+            "for Google's date grid, or [bold]flight search[/] for a single date."
         )
         return
     # Matrix chose the whole price string. This line parses markup and so does
