@@ -167,6 +167,13 @@ class _Locations(BaseModel):
     locations: list[Location] = Field(default_factory=list)
 
 
+class _Currencies(BaseModel):
+    """The `currencies` list of a currency-lookup answer; an answer without the
+    key holds none."""
+
+    currencies: list[dict[str, str]] = Field(default_factory=list)
+
+
 class MatrixClient:
     """Async, context-manager. One `execute()` method covers all search modes."""
 
@@ -390,7 +397,11 @@ class MatrixClient:
         return await self._parsed_get(url, params, data, Location.model_validate)
 
     async def currencies(self) -> list[dict[str, str]]:
-        data = await self._get_once(f"{BASE}/v1/currencies", {"key": self._api_key})
+        url = f"{BASE}/v1/currencies"
+        params = {"key": self._api_key}
+        data = await self._get_once(url, params)
         if isinstance(data, httpx.HTTPStatusError):
             raise _status_error(data) from None
-        return data.get("currencies", [])
+        return await self._parsed_get(
+            url, params, data, lambda body: _Currencies.model_validate(body).currencies
+        )
