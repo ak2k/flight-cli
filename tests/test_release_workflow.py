@@ -10,6 +10,10 @@ import sys
 import textwrap
 import tomllib
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import pytest
 
 _ROOT = Path(__file__).resolve().parent.parent
 _WORKFLOW = _ROOT / ".github" / "workflows" / "release.yml"
@@ -36,6 +40,14 @@ def _sections() -> tuple[str, str, str]:
     assert "\n  publish:\n" in jobs, "release.yml has no publish job"
     build, publish = jobs.split("\n  publish:\n", 1)
     return header, build, publish
+
+
+def _jobs() -> dict[str, str]:
+    """Every job under the top-level jobs: block by name, split at two-space indentation."""
+    text = _workflow_text()
+    assert "\njobs:\n" in text, "release.yml has no top-level jobs: block"
+    parts = re.split(r"^  ([\w-]+):[ \t]*$", text.split("\njobs:\n", 1)[1], flags=re.MULTILINE)
+    return dict(zip(parts[1::2], parts[2::2], strict=True))
 
 
 def _build_job() -> tuple[str, str]:
@@ -108,7 +120,20 @@ def test_release_publishes_through_trusted_publishing() -> None:
     assert re.search(r"^      id-token: write$", publish, re.MULTILINE)
     assert re.search(r"^        uses: pypa/gh-action-pypi-publish@", publish, re.MULTILINE)
     # A password or token input would bypass the OIDC trusted publisher.
-    assert not re.search(r"^\s*(password|user|token|api-token):", publish, re.MULTILINE)
+    # Block or inline (`with: {password: x}`) spelling.
+    assert not re.search(
+        r"""(^|[{,])\s*["']?(password|user|token|api-token)["']?\s*:""", publish, re.MULTILINE
+    )
+    # Only the publish job, in the pypi environment, may mint or use a publishing token.
+    jobs = _jobs()
+    checks = {
+        "uses pypa/gh-action-pypi-publish": r"pypa/gh-action-pypi-publish",
+        "grants id-token": r"id-token",
+        "is in environment pypi": r"^    environment: pypi$",
+    }
+    for what, pattern in checks.items():
+        names = [n for n, body in jobs.items() if re.search(pattern, body, re.MULTILINE)]
+        assert names == ["publish"], f"jobs that {what}: {names}"
 
 
 def test_release_refuses_a_tag_that_differs_from_the_declared_version(tmp_path: Path) -> None:
@@ -131,3 +156,54 @@ def test_release_refuses_a_tag_that_differs_from_the_declared_version(tmp_path: 
 def test_changelog_has_a_section_for_the_declared_version() -> None:
     assert _CHANGELOG.is_file(), "CHANGELOG.md does not exist"
     assert f"## [{_declared_version()}]" in _CHANGELOG.read_text()
+
+
+_EXTRA_JOB = """
+  extra:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: pypa/gh-action-pypi-publish@release/v1
+"""
+_PLAIN_JOB = """
+  extra:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo
+"""
+_PYPA_STEP = "      - uses: pypa/gh-action-pypi-publish@release/v1\n"
+_PUBLISH = "\n  publish:\n"
+
+
+def test_release_tests_refuse_a_publishing_path_outside_the_pypi_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = _workflow_text()
+    mutations = {
+        "job after publish": original.rstrip("\n") + "\n" + _EXTRA_JOB,
+        "job between build and publish": original.replace(_PUBLISH, _EXTRA_JOB + _PUBLISH),
+        "step in build": original.replace("\n" + _PUBLISH, "\n" + _PYPA_STEP + _PUBLISH),
+        "id-token in another job": original.rstrip("\n")
+        + "\n"
+        + _PLAIN_JOB.replace("    steps:", "    permissions:\n      id-token: write\n    steps:"),
+        "another job in environment pypi": original.rstrip("\n")
+        + "\n"
+        + _PLAIN_JOB.replace("    steps:", "    environment: pypi\n    steps:"),
+        "inline password": original.replace(
+            "uses: pypa/gh-action-pypi-publish@release/v1",
+            "uses: pypa/gh-action-pypi-publish@release/v1\n        with: {password: x}",
+        ),
+    }
+    unrefused: list[str] = []
+    for label, text in mutations.items():
+        assert text != original, f"mutation {label!r} changed nothing"
+        mutated = tmp_path / (label.replace(" ", "-") + ".yml")
+        mutated.write_text(text)
+        monkeypatch.setattr(sys.modules[__name__], "_WORKFLOW", mutated)
+        try:
+            test_release_publishes_through_trusted_publishing()
+        except AssertionError:
+            continue
+        unrefused.append(label)
+    monkeypatch.undo()
+    test_release_publishes_through_trusted_publishing()
+    assert not unrefused, f"the publish test accepts: {unrefused}"
