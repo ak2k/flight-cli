@@ -219,10 +219,10 @@ def _remember(fares: dict[str, _Seen]) -> None:
             merged = {**_load_seen(), **fares}
             _write(path, _SEEN.dump_json(merged, indent=2))
     except OSError as e:
-        typer.echo(f"{path} was not saved: {e.strerror}".translate(CTRL), err=True)
+        typer.echo(f"{path} was not saved: {e.strerror}".translate(_ONE_LINE), err=True)
     except typer.Exit:
         # `_locked` has already named the directory and why it refused.
-        typer.echo(f"{path} was not saved".translate(CTRL), err=True)
+        typer.echo(f"{path} was not saved".translate(_ONE_LINE), err=True)
 
 
 watch_app = typer.Typer(
