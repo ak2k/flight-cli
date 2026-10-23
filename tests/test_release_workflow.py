@@ -42,6 +42,14 @@ def _sections() -> tuple[str, str, str]:
     return header, build, publish
 
 
+def _jobs() -> dict[str, str]:
+    """Every job under the top-level jobs: block by name, split at two-space indentation."""
+    text = _workflow_text()
+    assert "\njobs:\n" in text, "release.yml has no top-level jobs: block"
+    parts = re.split(r"^  ([\w-]+):[ \t]*$", text.split("\njobs:\n", 1)[1], flags=re.MULTILINE)
+    return dict(zip(parts[1::2], parts[2::2], strict=True))
+
+
 def _build_job() -> tuple[str, str]:
     """The build job split into its own keys (before steps:) and its steps."""
     _, build, _ = _sections()
@@ -112,7 +120,20 @@ def test_release_publishes_through_trusted_publishing() -> None:
     assert re.search(r"^      id-token: write$", publish, re.MULTILINE)
     assert re.search(r"^        uses: pypa/gh-action-pypi-publish@", publish, re.MULTILINE)
     # A password or token input would bypass the OIDC trusted publisher.
-    assert not re.search(r"^\s*(password|user|token|api-token):", publish, re.MULTILINE)
+    # Block or inline (`with: {password: x}`) spelling.
+    assert not re.search(
+        r"""(^|[{,])\s*["']?(password|user|token|api-token)["']?\s*:""", publish, re.MULTILINE
+    )
+    # Only the publish job, in the pypi environment, may mint or use a publishing token.
+    jobs = _jobs()
+    checks = {
+        "uses pypa/gh-action-pypi-publish": r"pypa/gh-action-pypi-publish",
+        "grants id-token": r"id-token",
+        "is in environment pypi": r"^    environment: pypi$",
+    }
+    for what, pattern in checks.items():
+        names = [n for n, body in jobs.items() if re.search(pattern, body, re.MULTILINE)]
+        assert names == ["publish"], f"jobs that {what}: {names}"
 
 
 def test_release_refuses_a_tag_that_differs_from_the_declared_version(tmp_path: Path) -> None:
