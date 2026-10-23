@@ -5030,6 +5030,15 @@ def _render_search(
     _print_matrix_carrier_legend(shown)
 
 
+def _print_carrier_legend_line(named: Mapping[str, str | None]) -> None:
+    """The one `Carriers:` line both tables print, each named code once. An entry's
+    whitespace runs, a newline and a tab included, collapse to one space so a name
+    cannot break the legend over two lines; a table with no named code prints none."""
+    if any(named.values()):
+        entries = (" ".join(f"{code} {name}".split()) for code, name in named.items() if name)
+        console.print("[dim]Carriers: " + _safe_text(" · ".join(entries)) + "[/]")
+
+
 def _print_matrix_carrier_legend(shown: Sequence[Itinerary]) -> None:
     """The line under the itinerary table that names each carrier code its carriers
     column shows, in the order the rows first show them, as Matrix's `shortName`
@@ -5045,12 +5054,7 @@ def _print_matrix_carrier_legend(shown: Sequence[Itinerary]) -> None:
             if code and named.get(code) is None:
                 name = (carrier.short_name or "").translate(_CTRL).strip()
                 named[code] = name or None
-    if any(named.values()):
-        console.print(
-            "[dim]Carriers: "
-            + _safe_text(" · ".join(f"{code} {name}" for code, name in named.items() if name))
-            + "[/]"
-        )
+    _print_carrier_legend_line(named)
 
 
 # ───────────────── legroom formatters (gflight-populated; Matrix slices noop) ──
@@ -10866,12 +10870,7 @@ def _print_carrier_legend(members: list[Any], match_carriers: frozenset[str]) ->
             for shown in (raw_code,) if mf is None else (mf[:2].upper(), raw_code):
                 if named.get(shown) is None:
                     named[shown] = _carrier_name(shown, amenity)
-    if any(named.values()):
-        console.print(
-            "[dim]Carriers: "
-            + _safe_text(" · ".join(f"{code} {name}" for code, name in named.items() if name))
-            + "[/]"
-        )
+    _print_carrier_legend_line(named)
 
 
 def _gflight_route(legs: Any) -> str:
