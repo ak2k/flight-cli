@@ -10,6 +10,10 @@ import sys
 import textwrap
 import tomllib
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import pytest
 
 _ROOT = Path(__file__).resolve().parent.parent
 _WORKFLOW = _ROOT / ".github" / "workflows" / "release.yml"
@@ -131,3 +135,54 @@ def test_release_refuses_a_tag_that_differs_from_the_declared_version(tmp_path: 
 def test_changelog_has_a_section_for_the_declared_version() -> None:
     assert _CHANGELOG.is_file(), "CHANGELOG.md does not exist"
     assert f"## [{_declared_version()}]" in _CHANGELOG.read_text()
+
+
+_EXTRA_JOB = """
+  extra:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: pypa/gh-action-pypi-publish@release/v1
+"""
+_PLAIN_JOB = """
+  extra:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo
+"""
+_PYPA_STEP = "      - uses: pypa/gh-action-pypi-publish@release/v1\n"
+_PUBLISH = "\n  publish:\n"
+
+
+def test_release_tests_refuse_a_publishing_path_outside_the_pypi_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = _workflow_text()
+    mutations = {
+        "job after publish": original.rstrip("\n") + "\n" + _EXTRA_JOB,
+        "job between build and publish": original.replace(_PUBLISH, _EXTRA_JOB + _PUBLISH),
+        "step in build": original.replace("\n" + _PUBLISH, "\n" + _PYPA_STEP + _PUBLISH),
+        "id-token in another job": original.rstrip("\n")
+        + "\n"
+        + _PLAIN_JOB.replace("    steps:", "    permissions:\n      id-token: write\n    steps:"),
+        "another job in environment pypi": original.rstrip("\n")
+        + "\n"
+        + _PLAIN_JOB.replace("    steps:", "    environment: pypi\n    steps:"),
+        "inline password": original.replace(
+            "uses: pypa/gh-action-pypi-publish@release/v1",
+            "uses: pypa/gh-action-pypi-publish@release/v1\n        with: {password: x}",
+        ),
+    }
+    unrefused: list[str] = []
+    for label, text in mutations.items():
+        assert text != original, f"mutation {label!r} changed nothing"
+        mutated = tmp_path / (label.replace(" ", "-") + ".yml")
+        mutated.write_text(text)
+        monkeypatch.setattr(sys.modules[__name__], "_WORKFLOW", mutated)
+        try:
+            test_release_publishes_through_trusted_publishing()
+        except AssertionError:
+            continue
+        unrefused.append(label)
+    monkeypatch.undo()
+    test_release_publishes_through_trusted_publishing()
+    assert not unrefused, f"the publish test accepts: {unrefused}"
