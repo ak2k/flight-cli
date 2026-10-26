@@ -122,6 +122,19 @@ def test_a_string_subclass_in_a_str_column_is_stripped_without_calling_str(
     assert "\x1b" not in err, repr(err)
 
 
+def test_a_column_value_a_colliding_key_replaces_is_never_converted(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Two keys that strip to one name keep the later value, so the earlier one
+    never reaches the renderer and its `str` is never called."""
+    log_mod.configure("debug")
+    structlog.get_logger("flight_cli.x").debug(
+        "evt", logger=ValueError(_UnprintableStr(_BODY)), **{"log\x1bger": "safe"}
+    )
+    err = capsys.readouterr().err
+    assert "[safe]" in err, repr(err)
+
+
 def test_the_renderers_own_color_codes_survive(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
