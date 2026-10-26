@@ -11501,7 +11501,8 @@ _ENVELOPE_FORMATS = (*_VALID_FORMATS, "envelope")
 _ENVELOPE_FORMAT_CHOICES = "/".join(_ENVELOPE_FORMATS)
 _ENVELOPE_FORMAT_HELP = (
     "envelope is one versioned "
-    "JSON document, written at exit 0 and 1; a usage error (exit 2) writes no document. "
+    "JSON document, written at exit 0 and 1; exit 2 (a usage or configuration error) "
+    "writes no document. "
     "Its keys, whichever path answered: version, command, backend, currency, complete, "
     "notes, results, awards, insight, price_history, facets, price_graph, verify, "
     "cross_check, split_ticket. complete is false when the answer is narrower than "
