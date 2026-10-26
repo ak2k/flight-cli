@@ -5079,13 +5079,16 @@ def _print_carrier_legend_line(named: Mapping[str, str | None]) -> None:
         " ".join(f"{code} {name}".translate(_CTRL).split()) for code, name in named.items() if name
     ]
     entries = [entry for entry in entries if entry]
-    lines: list[str] = []
+    if not entries:
+        return
+    # The prefix counts toward the first line, so the first entry is measured too.
+    lines = ["Carriers:"]
     for i, entry in enumerate(entries):
         piece = entry + (" ·" if i < len(entries) - 1 else "")
-        if lines and cell_len(lines[-1] + " " + piece) <= console.width:
+        if cell_len(lines[-1] + " " + piece) <= console.width:
             lines[-1] += " " + piece
         else:
-            lines.append(("Carriers: " if not lines else "") + piece)
+            lines.append(piece)
     for line in lines:
         console.print("[dim]" + _safe_text(line) + "[/]")
 
