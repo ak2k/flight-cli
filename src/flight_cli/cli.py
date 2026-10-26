@@ -5069,12 +5069,25 @@ def _render_search(
 
 
 def _print_carrier_legend_line(named: Mapping[str, str | None]) -> None:
-    """The one `Carriers:` line both tables print, each named code once. An entry's
+    """The `Carriers:` legend both tables print, each named code once. An entry's
     whitespace runs, a newline and a tab included, collapse to one space so a name
-    cannot break the legend over two lines; a table with no named code prints none."""
-    if any(named.values()):
-        entries = (" ".join(f"{code} {name}".split()) for code, name in named.items() if name)
-        console.print("[dim]Carriers: " + _safe_text(" · ".join(entries)) + "[/]")
+    cannot break the legend over two lines; a table with no named code prints none.
+    When it outgrows the console it breaks only between entries, never between a
+    code and its name: Rich breaks at any space, a no-break space included, so the
+    break is chosen here, and an entry wider than the console is left for Rich to fold."""
+    entries = [
+        " ".join(f"{code} {name}".translate(_CTRL).split()) for code, name in named.items() if name
+    ]
+    entries = [entry for entry in entries if entry]
+    lines: list[str] = []
+    for i, entry in enumerate(entries):
+        piece = entry + (" ·" if i < len(entries) - 1 else "")
+        if lines and cell_len(lines[-1] + " " + piece) <= console.width:
+            lines[-1] += " " + piece
+        else:
+            lines.append(("Carriers: " if not lines else "") + piece)
+    for line in lines:
+        console.print("[dim]" + _safe_text(line) + "[/]")
 
 
 def _print_matrix_carrier_legend(shown: Sequence[Itinerary]) -> None:
