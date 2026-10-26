@@ -75,7 +75,11 @@ A `Tier-2` phrase also quotes, after the extension noun, each directive that
 declined, as typed and in `repr` (`a Tier-2 extension code ('+CABIN 2')`,
 `Tier-2 extension codes ('-CODESHARE', 'MINCONNECT 1:00')`), so the reader sees
 which of the codes they passed to drop; a Tier-1 directive beside them is not
-quoted. The `Matrix-only` phrases carry their reasons instead (below).
+quoted. The price graph's gate takes the same phrase but leaves out a
+`MINCONNECT`, which the graph admits, so it neither counts nor quotes one and
+names the leg that really declined (`-CODESHARE` on the return alone reads `a
+Tier-2 extension code ('-CODESHARE') on the return leg`). The `Matrix-only`
+phrases carry their reasons instead (below).
 
 Calling a booking class "Tier-2" points the reader at a post-filter that was
 never the problem; calling it "routing" points them at a flag they did not set;
