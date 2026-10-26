@@ -269,22 +269,27 @@ With awards on, the shape does not depend on the backend, and nothing in it
 names one. Cash-only is the case where the shape names the backend: a list is
 Google's, an object Matrix's. An empty Google board is still Google's answer:
 `[]` cash-only, and the award document with awards on, because the award
-providers run whatever Google served. The exception is a party with an
-infant on auto, whose empty board goes to Matrix (below). A Google-only flag
-(an arrival window, `--exclude-basic`), `--verify` or `--sellers` keeps that
-board Google's, with a note naming how to ask Matrix. Several cabins,
-cash-only, write one object keyed by cabin name.
+providers run whatever Google served. Cash-only under `--verify` or `--sellers`,
+it exits 1 with stdout empty, since there is no row to check or open. The
+exception is a party with an infant on auto, whose empty board goes to Matrix
+(below). A Google-only flag (an arrival window, `--exclude-basic`), `--verify`
+or `--sellers` keeps that board Google's, with a note naming how to ask Matrix.
+Several cabins, cash-only, write one object keyed by cabin name.
 
 On auto, a stderr line that begins `Using Matrix:` says why Matrix answered,
 and there are two causes. Google was asked and handed on: the row filter
 emptied its board, Google served no rows for a party with an infant, or the
 query failed (a rate limit, the consent page, no browser, an unreachable host,
-or anything else it raised). Or Google was never asked: a flag Google cannot
-serve (`--fare-rules`, a multi-city itinerary, a flexible date) sends the
-search to Matrix before any Google call, and the line reads `Using Matrix:
-Google Flights can't serve <reason>.` The document after either line is
-Matrix's. The default table survives the same failures by printing Matrix's
-half of its merged table, so JSON answers wherever the table does.
+or anything else it raised). An award search whose filter left only
+separate-ticket rows is handed on the same way, since awards are matched to
+one-ticket rows. Or Google was never asked: a flag Google cannot serve
+(`--fare-rules`, a multi-city itinerary, a flexible date) sends the search to
+Matrix before any Google call, and the line reads `Using Matrix: Google Flights
+can't serve <reason>.` A multi-city search still asks Google for each slice's
+one-ways when the table or `--split` shows separate tickets beside Matrix's
+answer. The document after either line is Matrix's. The default table survives
+the same failures by printing Matrix's half of its merged table, so JSON answers
+wherever the table does.
 
 `--fast`, `--backend gflight`, `--bags` and `--sellers` keep exit 1 with stdout
 empty when the Google query fails. `--fast` means Google alone, `--backend
