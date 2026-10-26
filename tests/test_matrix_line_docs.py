@@ -32,3 +32,22 @@ def test_infant_exception_names_what_keeps_the_board_on_google() -> None:
         "A Google-only flag (an arrival window, `--exclude-basic`), `--verify` or `--sellers` "
         "keeps that board Google's, with a note naming how to ask Matrix." in memo
     )
+
+
+def test_json_memo_names_three_cases_beside_the_matrix_line() -> None:
+    memo = _flat("docs/memories/wire_format_quirks.md")
+    assert (
+        "or anything else it raised). An award search whose filter left only "
+        "separate-ticket rows is handed on the same way, since awards are matched "
+        "to one-ticket rows." in memo
+    )
+    assert (
+        "Google Flights can't serve <reason>.` A multi-city search still asks Google "
+        "for each slice's one-ways when the table or `--split` shows separate tickets "
+        "beside Matrix's answer. The document after either line is Matrix's." in memo
+    )
+    assert (
+        "because the award providers run whatever Google served. Cash-only under "
+        "`--verify` or `--sellers`, it exits 1 with stdout empty, since there is no "
+        "row to check or open." in memo
+    )
