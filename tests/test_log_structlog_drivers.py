@@ -11,7 +11,7 @@ module outside `_gflight_ids` logs through.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 
 import pytest
 import structlog
@@ -72,6 +72,31 @@ def test_a_value_that_is_not_a_string_is_left_to_the_renderer(
     err = capsys.readouterr().err
     assert "err=ValueError('boom')" in err, err
     assert "n=3" in err, err
+
+
+class _Printed:
+    """Not a `str`, so `_strip_drivers` cannot translate it, but the renderer
+    writes it with `str`, which hands back the driver bytes untouched."""
+
+    @override
+    def __str__(self) -> str:
+        return _BODY
+
+
+def test_a_non_string_in_a_column_the_renderer_prints_with_str_is_stripped(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`ConsoleRenderer` renders the event, `logger` and `logger_name` columns
+    with `str`, not `repr`, so a non-string there reaches stderr as raw as a
+    string would have before the strip."""
+    log_mod.configure("debug")
+    log = structlog.get_logger("flight_cli.x")
+    log.debug(ValueError(_BODY))
+    log.debug("evt", logger=_Printed())
+    log.debug("evt", logger_name=_Printed())
+    err = capsys.readouterr().err
+    assert err.count("[/x][2J") == 3, repr(err)
+    assert "\x1b" not in err, repr(err)
 
 
 def test_the_renderers_own_color_codes_survive(
