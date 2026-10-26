@@ -21,7 +21,8 @@ def test_memo_says_a_wrapped_legend_breaks_only_between_entries() -> None:
     memo = " ".join(text.split())
     assert (
         "When the legend outgrows the console it breaks only between entries, never between a "
-        "code and its name; Rich breaks at any space, a no-break space included, so "
+        "code and its name, unless one entry is wider than the console; Rich then folds that "
+        "entry. Rich breaks at any space, a no-break space included, so "
         "`_print_carrier_legend_line` picks the break itself."
     ) in memo
 

@@ -325,5 +325,6 @@ naming each code by Matrix's `shortName`. Both go through
 `_print_carrier_legend_line`, which collapses the whitespace runs of an entry, a
 newline and a tab included, to one space, so a name cannot break the legend over
 two lines. When the legend outgrows the console it breaks only between entries,
-never between a code and its name; Rich breaks at any space, a no-break space
-included, so `_print_carrier_legend_line` picks the break itself.
+never between a code and its name, unless one entry is wider than the console;
+Rich then folds that entry. Rich breaks at any space, a no-break space included,
+so `_print_carrier_legend_line` picks the break itself.
