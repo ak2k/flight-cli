@@ -6657,7 +6657,8 @@ class _PageAsk:
     round trip asks every page's outbounds before any page's returns, so a page
     that answered its outbounds before the stop is named for the returns it did
     not get. A page whose pin loop stopped after serving is named `short`, not
-    `missing`, since its rows are on the board."""
+    `missing`, since its rows are on the board, and its line counts the return
+    boards its pin loop skipped, as the log line does."""
 
     def __init__(
         self, pages: list[tuple[Leg, ...]], *, gf_mode: GfTransportMode, bags: bool
@@ -6668,7 +6669,8 @@ class _PageAsk:
         self.failed: dict[int, GfBackendError] = {}
         self.unasked: set[int] = set()
         self.answered: set[int] = set()
-        self.short: set[int] = set()
+        # Page -> (return boards skipped, pins asked) of a page named `short`.
+        self.short: dict[int, tuple[int, int]] = {}
         self.stopped_at: int | None = None
         self.stop: GfBackendError | None = None
         # A page's refused Cheapest tab that the stop's line is printed ahead of.
@@ -6694,7 +6696,7 @@ class _PageAsk:
             if held is not None:
                 self._stopped(i, held)
                 self.failed[i] = held
-                self.short.add(i)
+                self.short[i] = (getattr(answer, "skipped", 0), getattr(answer, "pinned", 0))
             elif isinstance(tab, _GF_STOPS):
                 self._stopped(i, tab)
             return answer
@@ -6747,6 +6749,10 @@ def _report_pages(asked: _PageAsk) -> None:
         e = asked.failed.get(i)
         # A page whose pins stopped after serving has its rows on the board.
         state = "short" if i in asked.short else "missing"
+        count = ""
+        if i in asked.short:
+            skipped, pins = asked.short[i]
+            count = f"; {skipped:d} of {pins:d} return boards skipped"
         if e is not None:
             rung = _rung_reached(asked.gf_mode)
             why = _gf_refusal(e, transport=rung, bags=asked.bags).note.removesuffix(".")
@@ -6760,7 +6766,7 @@ def _report_pages(asked: _PageAsk) -> None:
         err.print(
             f"[yellow]Google Flights page {i + 1:d} of {n:d} "
             f"({_safe_text(','.join(out.origins))}→{_safe_text(','.join(out.destinations))}) "
-            f"is {state}: {why}.[/]"
+            f"is {state}: {why}{_safe_text(count)}.[/]"
         )
     for i, e in sorted(asked.displaced.items()):
         rung = _rung_reached(asked.gf_mode)
