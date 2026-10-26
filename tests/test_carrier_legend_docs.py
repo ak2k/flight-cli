@@ -14,3 +14,13 @@ def test_memo_says_a_legend_name_cannot_break_the_line() -> None:
         "collapses the whitespace runs of an entry, a newline and a tab included, to one "
         "space, so a name cannot break the legend over two lines"
     ) in memo
+
+
+def test_memo_says_a_wrapped_legend_breaks_only_between_entries() -> None:
+    text = (_ROOT / "docs/memories/gf_routing_and_carriers.md").read_text()
+    memo = " ".join(text.split())
+    assert (
+        "When the legend outgrows the console it breaks only between entries, never between a "
+        "code and its name; Rich breaks at any space, a no-break space included, so "
+        "`_print_carrier_legend_line` picks the break itself."
+    ) in memo

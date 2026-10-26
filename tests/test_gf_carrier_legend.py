@@ -195,6 +195,31 @@ def test_a_narrow_console_wraps_the_legend_within_its_width(
     assert _LEGEND in " ".join(" ".join(lines).split())
 
 
+def test_a_wrapping_legend_keeps_each_code_with_its_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """At 40 columns Rich alone ends the first line on `F9`, apart from its name."""
+    lines = _printed(monkeypatch, [_row(("MX", "100")), _row(("F9", "200"))], width=40)
+    start = next(i for i, ln in enumerate(lines) if ln.startswith("Carriers:"))
+    assert [ln.rstrip() for ln in lines[start:]] == [
+        "Carriers: MX Breeze Airways ·",
+        "F9 Frontier Airlines",
+    ]
+
+
+def test_a_legend_entry_that_fits_the_console_is_never_split_the_first_included(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`LH Lufthansa ·` fits 14 columns; with `Carriers: ` before it, it needs 24."""
+    split: list[int] = []
+    for width in range(14, 61):
+        lines = _printed(monkeypatch, [_row(("LH", "1")), _row(("B6", "2"))], width=width)
+        legend = lines[next(i for i, ln in enumerate(lines) if ln.startswith("Carriers:")) :]
+        if not all(any(e in ln for ln in legend) for e in ("LH Lufthansa", "B6 JetBlue")):
+            split.append(width)
+    assert split == []
+
+
 def test_a_search_prints_the_legend_under_its_table(gf_session: Callable[..., Any]) -> None:
     body = _answering(
         _ds1("ds1_jfk_lhr_tfu.json"), origin="JFK", destination="LHR", date=_DEP.isoformat()
