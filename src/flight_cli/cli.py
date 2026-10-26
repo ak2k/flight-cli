@@ -43,6 +43,7 @@ from typing import (
 )
 
 import anyio
+import anyio.from_thread
 import anyio.to_thread
 import typer
 from click import get_current_context
@@ -9260,64 +9261,65 @@ def _run_enriched_path(  # noqa: PLR0912, PLR0915 — one weave's outcome arms, 
     awards_only = sel.awards_only if sel is not None else False
     state: dict[str, Any] = {}
 
-    async def _go() -> None:
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(_matrix_into, state, asked, rps, impersonate, not no_cache)
-            # Google Flights is sync (curl_cffi) — run it in a worker thread so the
-            # Matrix request progresses concurrently on the event loop.
+    def _after_round_trip(gf: list[Any]) -> None:
+        """Runs on the event loop, called from the worker once the round trip is in."""
+        state["gf"] = gf
+        _note_other_currencies(gf, requested)
+        _note_stop_drops(gf)
+        # With Google's board empty the merged table is Matrix's, and the
+        # line would describe a board nobody is shown. The document's
+        # `search` half is Google's board, emptied or not.
+        if gf or json_out:
+            _note_row_cap(gf, requested)
+        _note_separate_tickets(
+            gf,
+            gf_mode=gf_mode,
+            bags=opts.bags is not None,
+            # A failed query is reported on its own, and its note says why
+            # nothing of Google's was read.
+            unchecked=(unchecked if separate_tickets == "show" and "gf_err" not in state else None),
+        )
+        # A document paints no table, as an awards-only run does; the
+        # empty-board note still goes to stderr, where it is true.
+        _paint_first_gf_table(
+            state, gf, legs=legs, top_n=top_n, awards_only=awards_only or json_out, opts=opts
+        )
+
+    def _google_half(weave: anyio.CancelScope) -> None:
+        # The scope closes the one Chrome after the last one-way, on this thread.
+        with _browser_scope(gf_mode):
             gf: list[Any]
             try:
-                gf = await anyio.to_thread.run_sync(
-                    partial(
-                        _gflight_results,
-                        legs,
-                        opts,
-                        top_n,
-                        gf_mode,
-                        gf_headed,
-                        separate_tickets="off" if unchecked else separate_tickets,
-                    )
+                gf = _gflight_results(
+                    legs,
+                    opts,
+                    top_n,
+                    gf_mode,
+                    gf_headed,
+                    separate_tickets="off" if unchecked else separate_tickets,
                 )
             except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
                 raise
             except Exception as e:  # noqa: BLE001 - reported below; Matrix may still succeed
                 state["gf_err"] = e
                 gf = []
-            state["gf"] = gf
-            _note_other_currencies(gf, requested)
-            _note_stop_drops(gf)
-            # With Google's board empty the merged table is Matrix's, and the
-            # line would describe a board nobody is shown. The document's
-            # `search` half is Google's board, emptied or not.
-            if gf or json_out:
-                _note_row_cap(gf, requested)
-            _note_separate_tickets(
-                gf,
-                gf_mode=gf_mode,
-                bags=opts.bags is not None,
-                # A failed query is reported on its own, and its note says why
-                # nothing of Google's was read.
-                unchecked=(
-                    unchecked if separate_tickets == "show" and "gf_err" not in state else None
-                ),
-            )
-            # A document paints no table, as an awards-only run does; the
-            # empty-board note still goes to stderr, where it is true.
-            _paint_first_gf_table(
-                state, gf, legs=legs, top_n=top_n, awards_only=awards_only or json_out, opts=opts
-            )
+            anyio.from_thread.run_sync(_after_round_trip, gf)
+            # A cancelled weave asks no one-way: its group is already unwinding.
+            if weave.cancel_called:
+                return
             if split and "gf_err" not in state:
-                state["split"] = await anyio.to_thread.run_sync(
-                    partial(
-                        _split_ticket,
-                        legs,
-                        opts,
-                        top_n,
-                        gf_mode,
-                        gf_headed,
-                        stopped=_search_stop(gf),
-                    )
+                state["split"] = _split_ticket(
+                    legs, opts, top_n, gf_mode, gf_headed, stopped=_search_stop(gf)
                 )
+
+    async def _go() -> None:
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(_matrix_into, state, asked, rps, impersonate, not no_cache)
+            # Google Flights is sync (curl_cffi) — run it in a worker thread so the
+            # Matrix request progresses concurrently on the event loop. One worker
+            # takes the round trip and the one-ways: a browser session is
+            # thread-local, so two hops could not share one Chrome.
+            await anyio.to_thread.run_sync(_google_half, tg.cancel_scope)
 
     _run_the_weave(_go, state, gf_mode)
 
