@@ -99,8 +99,9 @@ page's marked rows are filtered and counted into `dropped` as on one page.
 says the Cheapest tab went unread; a page holding no pin that the search did
 not reach after a stop takes the stop's error, since no page line names it.
 A tab that stopped the search, when no page line names that stop, is
-`separate_failed` ahead of an earlier page's refusal, which is then said on a
-line of its own (`_PageAsk.displaced`).
+`separate_failed` ahead of an earlier page's refusal. Every other page's
+refused tab that no line names is said on a line of its own
+(`_PageAsk.displaced`).
 Under `--gf-transport browser` one Chrome serves every page
 (`cli._browser_scope`).
 The pin loop and "A partial round trip is a success, deliberately" are in
