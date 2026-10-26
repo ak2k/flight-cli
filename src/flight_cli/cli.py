@@ -6652,11 +6652,12 @@ class _PageAsk:
     after serving some pins answers with its rows, and the stop it carries ends
     the asking as a raised one does. So does one a page's Cheapest tab met: the
     page answered, so no page line names it, and the tab's line says why, ahead of
-    an earlier page's refused tab, which gets a line of its own. A
-    round trip asks every page's outbounds before any page's returns, so a page
-    that answered its outbounds before the stop is named for the returns it did
-    not get. A page whose pin loop stopped after serving is named `short`, not
-    `missing`, since its rows are on the board."""
+    an earlier page's refused tab. Every other page's refused tab that no line
+    names gets a line of its own. A round trip asks every page's outbounds
+    before any page's returns, so a page that answered its outbounds before the
+    stop is named for the returns it did not get. A page whose pin loop stopped
+    after serving is named `short`, not `missing`, since its rows are on the
+    board."""
 
     def __init__(
         self, pages: list[tuple[Leg, ...]], *, gf_mode: GfTransportMode, bags: bool
@@ -6670,7 +6671,7 @@ class _PageAsk:
         self.short: set[int] = set()
         self.stopped_at: int | None = None
         self.stop: GfBackendError | None = None
-        # A page's refused Cheapest tab that the stop's line is printed ahead of.
+        # A page's refused Cheapest tab that neither the tab line nor a page line names.
         self.displaced: dict[int, GfBackendError] = {}
 
     def ask[T](self, i: int, call: Callable[[], T]) -> T | None:
@@ -6705,21 +6706,26 @@ class _PageAsk:
 
     def tab_refusal(self, tabs: dict[int, GfBackendError]) -> GfBackendError | None:
         """The refusal the one tab line says, of the pages' refused tabs `tabs`:
-        the first page's, but a stop no page line names goes ahead of it, and
-        the first page's refusal is then `displaced` onto a line of its own."""
+        the first page's, but a stop no page line names goes ahead of it. Every
+        other page's refusal that no line names is `displaced` onto a line of
+        its own."""
         if not tabs:
             return None
         first = min(tabs)
         stop = self.stop
+        said = tabs[first]
         if (
-            stop is None
-            or tabs[first] is stop
-            or stop in self.failed.values()
-            or stop not in tabs.values()
+            stop is not None
+            and tabs[first] is not stop
+            and stop not in self.failed.values()
+            and stop in tabs.values()
         ):
-            return tabs[first]
-        self.displaced[first] = tabs[first]
-        return stop
+            said = stop
+        named = [*self.failed.values(), said]
+        for i, e in tabs.items():
+            if not any(e is n for n in named):
+                self.displaced[i] = e
+        return said
 
     def report(self) -> None:
         """One stderr line per page that did not answer, in page order."""
