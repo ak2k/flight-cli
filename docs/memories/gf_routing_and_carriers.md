@@ -324,4 +324,6 @@ The Matrix table prints the same line through `_print_matrix_carrier_legend`,
 naming each code by Matrix's `shortName`. Both go through
 `_print_carrier_legend_line`, which collapses the whitespace runs of an entry, a
 newline and a tab included, to one space, so a name cannot break the legend over
-two lines.
+two lines. When the legend outgrows the console it breaks only between entries,
+never between a code and its name; Rich breaks at any space, a no-break space
+included, so `_print_carrier_legend_line` picks the break itself.
