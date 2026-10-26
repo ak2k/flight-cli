@@ -741,7 +741,7 @@ def test_the_graph_takes_what_google_applies_from_its_url(search: CalendarSearch
         (_search(extension="-CODESHARE"), "a Tier-2 extension code ('-CODESHARE')"),
         (
             _search(extension="MINCONNECT 3:00; -CODESHARE"),
-            "Tier-2 extension codes ('MINCONNECT 3:00', '-CODESHARE')",
+            "a Tier-2 extension code ('-CODESHARE')",
         ),
         (_search(routing="F* X:ORD F*"), "a connecting-airport filter (ORD)"),
         (_search(routing="BQ+"), "a carrier Google Flights has no code for (BQ)"),

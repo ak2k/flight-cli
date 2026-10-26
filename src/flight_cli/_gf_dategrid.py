@@ -79,7 +79,7 @@ from .routing_predicates import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Callable, Iterable, Sequence
 
     from .domain import CalendarSearch, Leg
     from .routing_predicates import Predicate
@@ -229,20 +229,37 @@ def _decliner_phrase(
     return f"both {tier} routing and {codes}" if routing else codes
 
 
-def _tier2_directives(extension: str | None) -> list[str]:
+def _tier2_directives(
+    extension: str | None, admits: Callable[[Predicate], bool] | None = None
+) -> list[str]:
     """The Tier-2 directives of `extension` as typed, in order: each
-    `;`-separated piece is classified alone, as `parse_extension` reads it."""
-    return [d.strip() for d in (extension or "").split(";") if classify(None, d).tier2]
+    `;`-separated piece is classified alone, as `parse_extension` reads it.
+    A directive whose every Tier-2 predicate `admits` is left out."""
+    return [
+        d.strip()
+        for d in (extension or "").split(";")
+        if _declined(classify(None, d).tier2, admits)
+    ]
 
 
-def grid_routing_blocker(search: CalendarSearch) -> str | None:
+def _declined(
+    tier2: Sequence[Predicate], admits: Callable[[Predicate], bool] | None
+) -> list[Predicate]:
+    """The Tier-2 predicates `admits` does not take; all of them when it is None."""
+    return [p for p in tier2 if admits is None or not admits(p)]
+
+
+def grid_routing_blocker(
+    search: CalendarSearch, admits: Callable[[Predicate], bool] | None = None
+) -> str | None:
     """Name the constraint keeping the date-grid off this calendar, or None when
     every predicate is Tier-1 and written in full (so no constraint is the reason).
 
     A diagnostic only — `grid_can_serve` owns the decision, and also rejects
     shapes no constraint speaks to (round trip, multi-airport). The price graph's
     gate (`_gf_calgraph.graph_blocker`) names its Tier-2 and Tier-3 refusals with
-    it too, so a calendar both gates refuse reads the same on either. Both tiers above
+    it too, so a calendar both gates refuse reads the same on either, save for a
+    directive the graph admits (`admits`, below). Both tiers above
     Tier-1 send a calendar to Matrix, but for different reasons: Tier-2 is
     post-filterable and merely needs the itineraries the grid does not return,
     while Tier-3 is fare construction Google can neither request nor reconstruct.
@@ -264,9 +281,14 @@ def grid_routing_blocker(search: CalendarSearch) -> str | None:
     `--extension` unless `--routing-ret` / `--ext-ret` replace them, so a return
     phrase is only ever about those two flags, and it says so. `--stops` is read
     last, in the same words as a MAXSTOPS the request cannot carry.
+
+    `admits`, when given, names the Tier-2 predicates the caller's gate takes
+    after all (the price graph writes a MINCONNECT on the page URL): such a
+    directive is neither counted nor quoted, and a leg left with none declining
+    is read past, so the phrase names the leg that really declined.
     """
     for i, leg in enumerate(search.legs):
-        phrase = _leg_blocker(leg)
+        phrase = _leg_blocker(leg, admits)
         if phrase is not None:
             return f"{phrase} on the return leg" if i else phrase
     return unwritten_constraint(_stops_option(search))
@@ -279,7 +301,7 @@ def _stops_option(search: CalendarSearch) -> list[Predicate]:
     return [] if ceiling is None else [StopsPred(max_stops=ceiling)]
 
 
-def _leg_blocker(leg: Leg) -> str | None:
+def _leg_blocker(leg: Leg, admits: Callable[[Predicate], bool] | None) -> str | None:
     """`grid_routing_blocker` for one leg."""
     routing_c = classify(leg.route_language, None)
     ext_c = classify(None, leg.extension)
@@ -298,12 +320,14 @@ def _leg_blocker(leg: Leg) -> str | None:
         # unexplained. This is also the count the phrase agrees in number with.
         reasons = routing_c.matrix_reasons + ext_c.matrix_reasons
         return f"{head} ({'; '.join(reasons)})" if reasons else head
-    if routing_c.tier2 or ext_c.tier2:
+    routing_tier2 = _declined(routing_c.tier2, admits)
+    ext_tier2 = _declined(ext_c.tier2, admits)
+    if routing_tier2 or ext_tier2:
         return _decliner_phrase(
             "Tier-2",
-            routing=bool(routing_c.tier2),
-            extension_count=len(ext_c.tier2),
-            directives=_tier2_directives(leg.extension),
+            routing=bool(routing_tier2),
+            extension_count=len(ext_tier2),
+            directives=_tier2_directives(leg.extension, admits),
         )
     return unwritten_constraint((*routing_c.predicates, *ext_c.predicates))
 

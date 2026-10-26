@@ -219,12 +219,15 @@ def graph_blocker(search: CalendarSearch) -> str | None:  # noqa: PLR0911 — on
 
     Refusals are tried in the order the narrower gate tries them, so a calendar
     that neither admits is named as that gate names it: routing the grids refuse
-    (`grid_routing_blocker`), then a code or bound the request would leave out,
-    then a time window, the options, a predicate the page cannot carry, a
-    combination the URL would write wider than asked, and legs that differ."""
+    (`grid_routing_blocker`, leaving out a MINCONNECT the graph admits), then a
+    code or bound the request would leave out, then a time window, the options,
+    a predicate the page cannot carry, a combination the URL would write wider
+    than asked, and legs that differ."""
     per_leg = [classify(leg.route_language, leg.extension).predicates for leg in search.legs]
     if any(p.tier is not Tier.GF_NATIVE and not _graph_takes(p) for ps in per_leg for p in ps):
-        return grid_routing_blocker(search) or "a constraint the price grid can't honor"
+        return (
+            grid_routing_blocker(search, _graph_takes) or "a constraint the price grid can't honor"
+        )
     for i, predicates in enumerate(per_leg):
         if (phrase := unwritten_constraint(predicates)) is not None:
             return f"{phrase} on the return leg" if i else phrase
