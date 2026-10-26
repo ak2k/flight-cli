@@ -64,7 +64,7 @@ with no such trip length. A Google cell's are its own
 `departure` and `return`.
 
 Exit codes are those of `--format json` in the same state, and an envelope is
-written at exit 0 and 1. Exit 2 is a usage error and writes none.
+written at exit 0 and 1. Exit 2 is a usage or configuration error and writes none.
 
 ## What makes `complete` false
 

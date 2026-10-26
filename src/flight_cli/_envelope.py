@@ -406,7 +406,7 @@ def run(
 ) -> None:
     """Run `call` as an envelope run, then write its one envelope to stdout.
 
-    No envelope at exit 2: that is a usage error, and the command never ran.
+    No envelope at exit 2: that is a usage or configuration error, and the command never ran.
     With `csv_out` the run writes the recorded table as CSV instead, at exit 0
     alone: a failed run writes nothing, so a header never stands for an answer.
     `consoles` print one stderr line per message for the run, so each message
