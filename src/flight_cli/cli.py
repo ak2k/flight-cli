@@ -265,13 +265,17 @@ def _settle_stdout() -> None:
     CPython's final flush cannot write, and Py_FinalizeEx then exits 120 over
     whatever code the command chose. Pointing stdout at /dev/null after the failed
     flush lets that last flush succeed."""
+    stdout = sys.stdout
+    if stdout is None:
+        # Started with fd 1 closed: there is no stream, and CPython skips it at exit too.
+        return
     try:
-        sys.stdout.flush()
+        stdout.flush()
     except BrokenPipeError:
         with contextlib.suppress(OSError, ValueError):
             null = os.open(os.devnull, os.O_WRONLY)
             try:
-                os.dup2(null, sys.stdout.fileno())
+                os.dup2(null, stdout.fileno())
             finally:
                 os.close(null)
     except (OSError, ValueError):

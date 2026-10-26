@@ -58,6 +58,27 @@ def test_a_closed_pipe_keeps_the_exit_code_the_command_chose(tmp_path: pathlib.P
     assert "BrokenPipeError" not in done.stderr, done.stderr
 
 
+def test_a_closed_stdout_keeps_the_exit_code_the_command_chose(tmp_path: pathlib.Path) -> None:
+    env = {**os.environ, "HOME": str(tmp_path), "XDG_CONFIG_HOME": str(tmp_path / "c")}
+    env |= {"XDG_CACHE_HOME": str(tmp_path / "k"), "MATRIX_CACHE_DIR": str(tmp_path / "m")}
+    env["FLIGHT_CLI_CONFIG_DIR"] = str(tmp_path / "f")
+    # The child starts with fd 1 closed, so CPython gives it `sys.stdout = None`.
+    launch = (
+        "import os, sys; os.close(1); os.execv(sys.executable, [sys.executable, *sys.argv[1:]])"
+    )
+    child = _CHILD.replace('sys.stdout.write("x\\n")', "pass")
+    done = subprocess.run(  # noqa: S603 — this interpreter running a literal child
+        [sys.executable, "-c", launch, "-c", child],
+        env=env,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert done.returncode == 2, done.stderr
+    assert "Traceback" not in done.stderr, done.stderr
+
+
 def test_the_memo_says_the_entry_point_settles_a_closed_pipe() -> None:
     root = pathlib.Path(__file__).parent.parent
     text = (root / "docs/memories/wire_format_quirks.md").read_text()
