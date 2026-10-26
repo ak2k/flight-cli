@@ -258,7 +258,8 @@ def grid_routing_blocker(
     A diagnostic only — `grid_can_serve` owns the decision, and also rejects
     shapes no constraint speaks to (round trip, multi-airport). The price graph's
     gate (`_gf_calgraph.graph_blocker`) names its Tier-2 and Tier-3 refusals with
-    it too, so a calendar both gates refuse reads the same on either. Both tiers above
+    it too, so a calendar both gates refuse reads the same on either, save for a
+    directive the graph admits (`admits`, below). Both tiers above
     Tier-1 send a calendar to Matrix, but for different reasons: Tier-2 is
     post-filterable and merely needs the itineraries the grid does not return,
     while Tier-3 is fare construction Google can neither request nor reconstruct.
