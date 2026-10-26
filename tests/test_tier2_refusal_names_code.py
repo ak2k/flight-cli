@@ -5,6 +5,7 @@ gate both take the phrase from `grid_routing_blocker`."""
 from __future__ import annotations
 
 from datetime import date, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -84,3 +85,24 @@ def test_the_return_leg_quotes_its_own_directive() -> None:
 def test_a_control_character_in_a_quoted_directive_is_escaped() -> None:
     blocker = grid_routing_blocker(_search(extension="-CITIES a\x1b[31m"))
     assert blocker == "a Tier-2 extension code ('-CITIES a\\x1b[31m')"
+
+
+def test_the_price_graph_names_the_return_leg_that_declined_not_an_admitted_minconnect() -> None:
+    search = _search(round_trip=True, extension="MINCONNECT 3:00", extension_ret="-CODESHARE")
+    expected = "a Tier-2 extension code ('-CODESHARE') on the return leg"
+    assert cg.graph_blocker(search) == expected
+
+
+def test_the_price_graph_does_not_count_an_admitted_minconnect() -> None:
+    search = _search(extension="MINCONNECT 3:00;-CODESHARE")
+    assert cg.graph_blocker(search) == "a Tier-2 extension code ('-CODESHARE')"
+    # The grid has no MINCONNECT to admit, so its phrase still counts both.
+    assert grid_routing_blocker(search) == (
+        "Tier-2 extension codes ('MINCONNECT 3:00', '-CODESHARE')"
+    )
+
+
+def test_the_date_grid_memory_says_the_graph_leaves_out_an_admitted_minconnect() -> None:
+    memory = Path(__file__).resolve().parent.parent / "docs" / "memories" / "gf_date_grid.md"
+    text = " ".join(memory.read_text().split())
+    assert "The price graph's gate takes the same phrase but leaves out a `MINCONNECT`" in text
