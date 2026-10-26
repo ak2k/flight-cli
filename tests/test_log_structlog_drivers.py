@@ -99,6 +99,29 @@ def test_a_non_string_in_a_column_the_renderer_prints_with_str_is_stripped(
     assert "\x1b" not in err, repr(err)
 
 
+class _UnprintableStr(str):
+    """A `str` whose own `__str__` raises: its text is already the string."""
+
+    __slots__ = ()
+
+    @override
+    def __str__(self) -> str:
+        raise RuntimeError
+
+
+def test_a_string_subclass_in_a_str_column_is_stripped_without_calling_str(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    log_mod.configure("debug")
+    log = structlog.get_logger("flight_cli.x")
+    log.debug(_UnprintableStr(_BODY))
+    log.debug("evt", logger=_UnprintableStr(_BODY))
+    log.debug("evt", logger_name=_UnprintableStr(_BODY))
+    err = capsys.readouterr().err
+    assert err.count("[/x][2J") == 3, repr(err)
+    assert "\x1b" not in err, repr(err)
+
+
 def test_the_renderers_own_color_codes_survive(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -132,7 +132,7 @@ def _strip_drivers(_logger: WrappedLogger, _method_name: str, event_dict: EventD
     stripped: EventDict = {}
     for raw_key, raw in event_dict.items():
         key = raw_key.translate(_DRIVERS)
-        value = str(raw) if key in _STR_COLUMNS else raw
+        value = str(raw) if key in _STR_COLUMNS and not isinstance(raw, str) else raw
         stripped[key] = value.translate(_DRIVERS) if isinstance(value, str) else value
     return stripped
 
