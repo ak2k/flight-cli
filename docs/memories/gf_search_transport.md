@@ -269,12 +269,14 @@ to +4. JFK-LAX states grams on 95 of 95 rows and JFK-LHR on 100 of 101 (VS46
 states only the typical). Each direction is its own: the HNL-MIA outbound page
 states 4264000 and its pinned return board 1539000, and no page states a pair
 total. Google says the estimate is for the passengers searched, and at two
-adults every row and leg figure doubles: JFK-LAX on 2026-10-20 at `--adults 2`
-against one adult gave 39 of 39 matched rows at exactly 2x (DL747 229000 to
-458000, B6 1523 419000 to 838000), every leg ratio 2.0, typical 346000 to
-693000, the percent unchanged on 38 of 39. Each Google JSON row fills
-`co2_emissions_g`, `co2_emissions_typical_g`, `co2_emissions_delta_pct` and
-`emissions_tag`, and each leg `co2_emissions_g`, null where the slot is empty.
+adults every row and leg gram figure doubles: JFK-LAX on 2026-10-20 at
+`--adults 2` against one adult gave 39 of 39 matched rows at exactly 2x (DL747
+229000 to 458000, B6 1523 419000 to 838000), every leg ratio 2.0, typical 346000
+to 693000 (2.003x, not an exact double), the percent unchanged on 38 of 39. The
+percent and label slots are not grams and do not double. Each Google JSON row
+fills `co2_emissions_g`, `co2_emissions_typical_g`, `co2_emissions_delta_pct`
+and `emissions_tag`, and each leg `co2_emissions_g`, null where the slot is
+empty.
 The Google table adds `CO2 kg` (kilograms and the percent; green lower, red
 higher) when a shown row has a figure.
 
