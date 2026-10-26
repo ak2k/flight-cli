@@ -208,8 +208,8 @@ second Ctrl-C only when it stopped a driver; an `auto` search that never
 escalated has none, so its second Ctrl-C flushes both streams and exits 130
 without waiting on the worker (`_gf_browser.second_ctrl_c_exits`), and a
 throttle met after the first prints no escalation line. The
-enriched path's `--split` runs on a worker of its own, so after an escalation it
-opens a second Chrome there.
+enriched path's `--split` runs on the worker that ran the round trip, inside one
+`cli._browser_scope`, so an escalated Chrome prices the one-ways too.
 
 A multi-cabin search does not escalate: it fans its cabins out on http under
 `auto`, since a thread per cabin escalating would be a Chrome per cabin on one
