@@ -2187,7 +2187,8 @@ class Board[T](list[T]):
     tab's in each currency (`lowest_caps`). `stopped` is the throttle,
     transport failure or dead browser that ended a round trip's pin loop after
     some pin was served: the rows are kept, and a caller that asks more pages
-    reads it to end the search."""
+    reads it to end the search. `skipped` is how many of the `pinned` return
+    boards that stop left unasked, for the page line that names the page."""
 
     def __init__(
         self,
@@ -2204,6 +2205,7 @@ class Board[T](list[T]):
         separate_failed: GfBackendError | None = None,
         capped_at: Mapping[str, float] | None = None,
         stopped: GfBackendError | None = None,
+        skipped: int = 0,
     ) -> None:
         super().__init__(rows)
         self.insight = insight
@@ -2218,6 +2220,7 @@ class Board[T](list[T]):
         self.separate_hidden = separate_hidden
         self.separate_failed = separate_failed
         self.stopped = stopped
+        self.skipped = skipped
         self.page_insights: tuple[PriceInsight, ...] = ()
         self.page_histories: tuple[PriceHistory, ...] = ()
         self.page_facets: tuple[RouteFacets, ...] = ()
@@ -3196,6 +3199,7 @@ def search_with_ids(  # noqa: PLR0915 — one arm per way a pin ends, each accou
         # with the outbound page's.
         capped_at=lowest_caps(first.capped_at, *return_caps),
         stopped=stopped,
+        skipped=skipped,
     )
     # Before the pin outcome is judged: a separate-ticket itinerary needs no
     # return board, so one that is shown is served even when every return
@@ -3272,6 +3276,7 @@ def _with_separate_tickets(
             separate_failed=failed,
             capped_at=capped_at,
             stopped=answer.stopped,
+            skipped=answer.skipped,
         )
 
     if stopped is not None:

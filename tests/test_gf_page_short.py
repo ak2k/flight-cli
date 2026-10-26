@@ -7,6 +7,7 @@ every GET throttled from page 1's third GET on, which is its second pin."""
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from conftest import capture_err
@@ -27,10 +28,13 @@ if TYPE_CHECKING:
     import pytest
 
 
-def test_a_page_whose_pins_stopped_after_serving_is_named_short(
+def test_a_page_whose_pins_stopped_after_serving_is_named_short_with_its_skipped_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Red at the base: page 1 printed its two rows and was named `is missing`."""
+    """Page 1 printed its two rows. It is named `is short`, with the return
+    boards its pin loop skipped counted as the log line counts them: the first
+    of its five pins was served, so four were skipped. Red at the base: its line
+    ended at the reason."""
 
     def no_sleep(*_a: object) -> None:
         return None
@@ -57,9 +61,17 @@ def test_a_page_whose_pins_stopped_after_serving_is_named_short(
     assert result.exit_code == 0, result.output
     assert len(json.loads(result.stdout)) == 2  # the pin served before the throttle
     printed = _flat(buf.getvalue())
-    short = _missing(1, "Google Flights rate-limited").replace("is missing", "is short")
+    why = "Google Flights rate-limited; 4 of 5 return boards skipped"
+    short = _missing(1, why).replace("is missing", "is short")
     assert short in printed, printed
     assert _missing(1, "Google Flights rate-limited") not in printed, printed
     returns = "its returns were not asked after page 1 stopped the search"
     for n in (2, 3, 4):
         assert _missing(n, returns) in printed, printed
+
+
+def test_the_multi_page_memo_says_a_short_page_counts_its_skipped_return_boards() -> None:
+    """The memo that describes the page lines gives the count the line ends with."""
+    root = Path(__file__).resolve().parent.parent
+    memo = " ".join((root / "docs/memories/gf_multi_page_legs.md").read_text().split())
+    assert "`is short: <reason>; N of M return boards skipped`" in memo
