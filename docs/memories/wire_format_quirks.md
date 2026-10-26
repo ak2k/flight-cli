@@ -239,9 +239,10 @@ is exactly that run: its whole refusal arrives. A caller that pipes into `head`
 sees this, and it is indistinguishable from the reading above on stdout alone.
 `--format json` is the one arm none of it describes: it writes with a bare
 `sys.stdout.write` outside the delivery guard, so there is no `SystemExit` for
-anything to catch, and under a reader that hangs up the process ends at exit 120
-with a `BrokenPipeError` on stderr that nothing here composed (tracked in
-work-h70kv.29).
+anything to catch. Under a reader that hangs up, the `flight` entry point
+(`_FlightApp` in cli.py) flushes stdout itself and, when that fails, points stdout
+at `/dev/null`, so CPython's final flush no longer forces exit 120 over the code
+the command chose and no `BrokenPipeError` reaches stderr.
 
 ## What a black-box caller can read off `flight search --format json`
 
