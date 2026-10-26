@@ -5,10 +5,12 @@ and both one-ways, as a multi-page search holds one across its pages."""
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
+from typer.testing import CliRunner
 
 from flight_cli import _gf_browser as gfb
 from flight_cli import _gflight_ids as gfid
@@ -92,6 +94,46 @@ def test_enriched_split_over_the_browser_holds_one_session(
     assert len(sessions) >= 3, (_DEP, _RET, len(sessions))  # the round trip, then both one-ways
     assert painted_on_loop == [True]  # the first table is painted by the event loop's thread
     assert len({id(s) for s in sessions}) == 1
+
+
+def test_a_cancelled_weave_asks_no_one_way(monkeypatch: pytest.MonkeyPatch) -> None:
+    google = _Google([("JFK", "LAX"), ("LAX", "JFK")])
+    held: list[bool] = []
+
+    def slow(
+        filters: Any, *, currency: str = "USD", cheapest: bool = False
+    ) -> gfid.Board[gfid.GFlightWithId]:
+        if not held:  # the round trip is still out when Matrix fails
+            held.append(True)
+            time.sleep(0.5)
+        return google(filters, currency=currency, cheapest=cheapest)
+
+    async def cancel_the_weave(_state: dict[str, Any], *_a: Any) -> None:
+        raise RuntimeError("the weave is cancelled")
+
+    monkeypatch.setattr(gfid, "_one_call", slow)
+    monkeypatch.setattr(cli, "_matrix_into", cancel_the_weave)
+    args = [
+        "search",
+        "--cash-only",
+        "--no-google-url",
+        "--no-matrix-url",
+        "JFK",
+        "LAX",
+        "--dep",
+        _DEP.isoformat(),
+        "--return",
+        _RET.isoformat(),
+        "--backend",
+        "gflight",
+        "--enrich",
+        "--split",
+        "--gf-transport",
+        "http",
+    ]
+    result = CliRunner().invoke(cli.app, args, env={"COLUMNS": "200", "NO_COLOR": "1"})
+    assert "the one-way searches did not finish" in result.output
+    assert len(google.calls) == 2, google.calls  # the round trip's outbound and return only
 
 
 def test_the_throttle_ladder_memo_no_longer_says_the_enriched_split_opens_a_second_chrome() -> None:
