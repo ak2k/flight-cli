@@ -12,6 +12,8 @@ import pathlib
 import subprocess
 import sys
 
+import pytest
+
 _CHILD = """
 import sys
 import typer
@@ -62,3 +64,23 @@ def test_the_memo_says_the_entry_point_settles_a_closed_pipe() -> None:
     memo = " ".join(text.split())
     assert "the `flight` entry point (`_FlightApp` in cli.py) flushes stdout itself" in memo
     assert "ends at exit 120" not in memo
+
+
+@pytest.mark.skipif(not pathlib.Path("/dev/full").exists(), reason="needs /dev/full")
+def test_a_full_disk_still_fails_the_run(tmp_path: pathlib.Path) -> None:
+    env = {**os.environ, "HOME": str(tmp_path), "XDG_CONFIG_HOME": str(tmp_path / "c")}
+    env |= {"XDG_CACHE_HOME": str(tmp_path / "k"), "MATRIX_CACHE_DIR": str(tmp_path / "m")}
+    env["FLIGHT_CLI_CONFIG_DIR"] = str(tmp_path / "f")
+    child = _CHILD.replace("raise typer.Exit(2)", "return")
+    with pathlib.Path("/dev/full").open("w") as full:
+        done = subprocess.run(  # noqa: S603 — this interpreter running a literal child
+            [sys.executable, "-c", child],
+            env=env,
+            stdout=full,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    assert done.returncode != 0, done.stderr
+    assert "No space left on device" in done.stderr, done.stderr

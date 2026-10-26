@@ -20,6 +20,7 @@ import contextlib
 import importlib.metadata
 import json
 import math
+import os
 import re
 import shlex
 import sys
@@ -257,7 +258,39 @@ class _RootGroup(TyperGroup):
         return super().parse_args(ctx, args)
 
 
-app = typer.Typer(
+def _settle_stdout() -> None:
+    """Flush stdout now, while the exit code is still ours to choose.
+
+    A reader that hung up (`flight ... | head -1`) leaves buffered bytes that
+    CPython's final flush cannot write, and Py_FinalizeEx then exits 120 over
+    whatever code the command chose. Pointing stdout at /dev/null after the failed
+    flush lets that last flush succeed."""
+    try:
+        sys.stdout.flush()
+    except BrokenPipeError:
+        with contextlib.suppress(OSError, ValueError):
+            null = os.open(os.devnull, os.O_WRONLY)
+            try:
+                os.dup2(null, sys.stdout.fileno())
+            finally:
+                os.close(null)
+    except (OSError, ValueError):
+        # Any other failed write (a full disk) stays CPython's to report at exit.
+        return
+
+
+class _FlightApp(typer.Typer):
+    """The `flight` entry point: every command ends through `_settle_stdout`."""
+
+    @override
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return super().__call__(*args, **kwargs)
+        finally:
+            _settle_stdout()
+
+
+app = _FlightApp(
     cls=_RootGroup, rich_markup_mode="rich", help="CLI for ITA Matrix's Alkali backend."
 )
 app.add_typer(auth_app, name="auth")
