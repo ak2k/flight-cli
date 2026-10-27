@@ -80,6 +80,12 @@ _DRIVERS = {
 }
 
 
+# The columns `ConsoleRenderer` renders with `str` rather than `repr`. Its
+# `timestamp` column is the fourth, left out because `TimeStamper` overwrites
+# that key with a string before this processor runs.
+_STR_COLUMNS = frozenset({"event", "logger", "logger_name"})
+
+
 class _StderrHandler(logging.Handler):
     """Writes to whatever `sys.stderr` is when the record is emitted.
 
@@ -116,14 +122,21 @@ def _strip_drivers(_logger: WrappedLogger, _method_name: str, event_dict: EventD
 
     `ConsoleRenderer` reprs a string only when it holds a space or a quote, so a
     remote body with an escape sequence in it is written raw at `-vv`. It reprs
-    every other value type, which escapes what this drops from strings, so only
-    `str` needs the pass. It runs as the last processor before the renderer, so
-    the renderer's own color codes are added after it and survive; stripping
-    the stream instead would remove them too."""
-    return {
-        key.translate(_DRIVERS): value.translate(_DRIVERS) if isinstance(value, str) else value
-        for key, value in event_dict.items()
-    }
+    every other value type, which escapes what this drops from strings, except
+    in the columns it renders with `str`: the event, `logger` and `logger_name`
+    (`_STR_COLUMNS`). A non-string there is turned into its `str` first, so the
+    same pass reaches what the renderer would have written raw. Keys are
+    stripped before any value is converted: two keys that strip to one name keep
+    the later value, and only the value the renderer will print is converted. It
+    runs as the last processor before the renderer, so the renderer's own color
+    codes are added after it and survive; stripping the stream instead would
+    remove them too."""
+    merged: EventDict = {raw_key.translate(_DRIVERS): raw for raw_key, raw in event_dict.items()}
+    stripped: EventDict = {}
+    for key, raw in merged.items():
+        value = str(raw) if key in _STR_COLUMNS and not isinstance(raw, str) else raw
+        stripped[key] = value.translate(_DRIVERS) if isinstance(value, str) else value
+    return stripped
 
 
 def _stderr_wants_colour() -> bool:
